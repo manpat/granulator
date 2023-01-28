@@ -3,12 +3,13 @@
 use eframe::egui;
 use anyhow::Result;
 
-use cpal::traits::{HostTrait, DeviceTrait, StreamTrait};
-use rand::prelude::*;
+use cpal::traits::{HostTrait, DeviceTrait};
+// use rand::prelude::*;
 
-use tokio::task;
+// use tokio::task;
 
-use std::sync::{Arc, Mutex};
+mod input;
+mod output;
 
 
 #[tokio::main]
@@ -30,94 +31,18 @@ async fn main() -> Result<()> {
 
 	let output_config = cpal::StreamConfig {
 		channels: 2,
-		// sample_rate: input_config.sample_rate,
 		.. output_device.default_output_config()?.config()
 	};
 
 
-	let input_state = Arc::new(Mutex::new(InputStreamState::default()));
-	let output_state = Arc::new(Mutex::new(OutputStreamState::default()));
+	let input_stream = input::InputStream::start(&input_device, input_config)?;
+	let output_stream = output::OutputStream::start(&output_device, output_config)?;
 
-	let input_stream = input_device.build_input_stream(
-		&input_config,
-		{
-			let input_state = input_state.clone();
-
-			move |data: &[f32], _: &cpal::InputCallbackInfo| {
-				let mut state = input_state.lock().unwrap();
-
-				if let Some(rec_buf) = state.record_buffer.as_mut() {
-					rec_buf.extend_from_slice(&data);
-				}
-			}
-		},
-
-		move |_err| {}
-	)?;
-
-	let output_stream = output_device.build_output_stream(
-		&output_config,
-		{
-			let output_state = output_state.clone();
-
-			move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-				let mut state = output_state.lock().unwrap();
-
-				let OutputStreamState {play_buffer, cursor, range, grains} = &mut *state;
-
-				data.fill(0.0);
-
-				let (min, max) = range.unwrap_or((0, play_buffer.len()));
-				if min >= max || max > play_buffer.len() {
-					return;
-				}
-
-				let width = max - min;
-
-				while *cursor < min {
-					*cursor += width;
-				}
-
-				*cursor = (*cursor - min + data.len() / 2) % width + min;
-
-
-				grains.update();
-
-				let cursor_spawn_jitter = grains.cursor_spawn_jitter;
-				let stereo_width = grains.stereo_width;
-
-				while grains.grains.len() < grains.num_grains {
-					let mut rng = rand::thread_rng();
-					let mut grain_start = rng.gen_range::<usize, _>(cursor.saturating_sub(cursor_spawn_jitter)..=(*cursor + cursor_spawn_jitter).min(play_buffer.len()));
-
-					while grain_start < min {
-						grain_start += width;
-					}
-					while grain_start > max {
-						grain_start -= width;
-					}
-
-					let grain_len = rng.gen_range::<usize, _>(grains.grain_length_min..=grains.grain_length_max);
-					let pan = rng.gen_range(-stereo_width..=stereo_width);
-
-					grains.grains.push(Grain::new(grain_start, (grain_start + grain_len).min(play_buffer.len()), pan));
-				}
-
-				for grain in grains.grains.iter_mut() {
-					grain.process_into(data, &play_buffer);
-				}
-			}
-		},
-		move |_err| {}
-	)?;
-
-	input_stream.play()?;
-	output_stream.play()?;
 
 	eframe::run_native("Granulator", <_>::default(), Box::new(move |_cc| {
 		Box::new(AppRoot {
-			input_state,
-			output_state,
+			input_stream,
+			output_stream,
 
 			display_buf: Vec::new(),
 			range_start: None,
@@ -130,26 +55,9 @@ async fn main() -> Result<()> {
 
 
 
-#[derive(Default)]
-struct InputStreamState {
-	record_buffer: Option<Vec<f32>>,
-}
-
-#[derive(Default)]
-struct OutputStreamState {
-	play_buffer: Vec<f32>,
-	cursor: usize,
-
-	range: Option<(usize, usize)>,
-
-	grains: GrainEngine,
-}
-
-
-
 struct AppRoot {
-	input_state: Arc<Mutex<InputStreamState>>,
-	output_state: Arc<Mutex<OutputStreamState>>,
+	input_stream: input::InputStream,
+	output_stream: output::OutputStream,
 
 	display_buf: Vec<f32>,
 	range_start: Option<usize>,
@@ -159,19 +67,19 @@ struct AppRoot {
 impl eframe::App for AppRoot {
 	fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
 		egui::CentralPanel::default().show(ctx, |ui| {
-			let recording = self.input_state.lock().unwrap().record_buffer.is_some();
+			let recording = self.input_stream.lock_state().record_buffer.is_some();
 
 			ui.horizontal(|ui| {
 				if recording {
 					if ui.button("Stop").clicked() {
-						let buffer = self.input_state.lock().unwrap().record_buffer.take().unwrap();
-						self.display_buf = buffer.clone();
+						let buffer = self.input_stream.lock_state().record_buffer.take().unwrap();
+						// self.display_buf = buffer.clone();
 						self.range_start = None;
 						self.range_end = None;
 
-						let output_state = self.output_state.clone();
+						// let output_state = self.output_state.clone();
 
-						task::spawn_blocking(move || {
+						// task::spawn_blocking(move || {
 							use rubato::{Resampler, SincFixedIn, InterpolationType, InterpolationParameters, WindowFunction};
 							let params = InterpolationParameters {
 								sinc_len: 256,
@@ -193,22 +101,24 @@ impl eframe::App for AppRoot {
 							let mut waves_out = resampler.process(&waves_in, None).unwrap();
 							let waves_out = waves_out.remove(0);
 
-							let mut out_state = output_state.lock().unwrap();
+							self.display_buf = waves_out.clone();
+
+							let mut out_state = self.output_stream.lock_state();
 							out_state.play_buffer = waves_out;
 							out_state.range = None;
 							out_state.cursor = 0;
 							out_state.grains.clear();
-						});
+						// });
 					}
 				} else {
 					if ui.button("Record").clicked() {
 						let buf = Vec::with_capacity(48000);
-						let mut state = self.input_state.lock().unwrap();
+						let mut state = self.input_stream.lock_state();
 						state.record_buffer = Some(buf);
 					}
 				}
 
-				let mut state = self.output_state.lock().unwrap();
+				let mut state = self.output_stream.lock_state();
 
 				if ui.button("Clear").clicked() {
 					self.display_buf.clear();
@@ -277,7 +187,7 @@ impl eframe::App for AppRoot {
 
 
 				if update_output_state {
-					let mut out_state = self.output_state.lock().unwrap();
+					let mut out_state = self.output_stream.lock_state();
 					let (range_start, range_end) = (self.range_start.unwrap_or(0), self.range_end.unwrap_or(self.display_buf.len()));
 					out_state.range = Some((range_start, range_end));
 				}
@@ -319,7 +229,7 @@ impl eframe::App for AppRoot {
 				}
 
 				// Draw play cursor
-				let cursor = self.output_state.lock().unwrap().cursor;
+				let cursor = self.output_stream.lock_state().cursor;
 				let cursor_x = cursor as f32 / num_samples as f32 * display_width;
 
 				painter.vline(rect.min.x + cursor_x, rect.y_range(), cursor_stroke);
@@ -334,7 +244,7 @@ impl eframe::App for AppRoot {
 
 
 
-struct GrainEngine {
+pub struct GrainEngine {
 	grains: Vec<Grain>,
 
 	num_grains: usize,
