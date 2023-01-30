@@ -1,5 +1,6 @@
 use cpal::traits::{DeviceTrait, StreamTrait};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 
 pub struct InputStream {
@@ -10,8 +11,9 @@ pub struct InputStream {
 
 #[derive(Default)]
 pub struct InputStreamState {
-	pub record_buffer: Option<Vec<f32>>,
+	record_buffer: Option<Vec<f32>>,
 }
+
 
 
 impl InputStream {
@@ -38,8 +40,16 @@ impl InputStream {
 		})
 	}
 
-	pub fn lock_state(&self) -> MutexGuard<'_, InputStreamState> {
-		self.state.lock().unwrap()
+	pub async fn start_record(&self) {
+		let buf = Vec::with_capacity(48000);
+
+		let mut state = self.state.lock().await;
+		state.record_buffer = Some(buf);
+	}
+
+	pub async fn stop_record(&self) -> Option<Vec<f32>> {
+		let mut state = self.state.lock().await;
+		state.record_buffer.take()
 	}
 }
 
@@ -51,7 +61,7 @@ struct Callback {
 
 impl Callback {
 	fn process(&self, data: &[f32], _: &cpal::InputCallbackInfo) {
-		let mut state = self.state.lock().unwrap();
+		let mut state = self.state.blocking_lock();
 
 		if let Some(rec_buf) = state.record_buffer.as_mut() {
 			rec_buf.extend_from_slice(&data);
