@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.68"
 cpal = "0.14.2"
+egui = "0.20"
 eframe = "0.20.1"
 rand = "0.8.5"
 tokio = { version = "1.24.1", features = ["full"] }

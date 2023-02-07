@@ -1,6 +1,5 @@
 #![feature(array_chunks)]
 
-use eframe::egui;
 use anyhow::Result;
 
 
@@ -8,6 +7,7 @@ mod input;
 mod output;
 mod coordinator;
 mod grain;
+mod view;
 
 use coordinator::{Coordinator, PlaySettings};
 
@@ -55,7 +55,6 @@ impl eframe::App for AppRoot {
 	fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
 		egui::CentralPanel::default().show(ctx, |ui| {
 			let recording = self.coordinator.display_state().is_recording;
-			let num_samples = self.coordinator.display_state().play_buffer.len();
 
 			ui.horizontal(|ui| {
 				if recording {
@@ -85,90 +84,16 @@ impl eframe::App for AppRoot {
 				self.settings.grain.grain_length_max = min.max(max);
 			});
 
-			let (response, mut painter) = ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
-			let rect = response.rect.shrink(5.0);
-			painter.set_clip_rect(rect);
 
-			let bg_color = ui.visuals().panel_fill;
-			let outline_stroke = ui.visuals().window_stroke;
-			let wave_stroke = egui::Stroke::new(1.0, egui::Color32::YELLOW);
-			let cursor_stroke = egui::Stroke::new(1.0, egui::Color32::LIGHT_BLUE);
-			let selection_color = egui::Color32::LIGHT_BLUE.linear_multiply(0.2);
+			let display_state = self.coordinator.display_state();
+			let waveform_widget = view::Waveform {
+				buffer: &display_state.play_buffer,
+				selection_start: &mut self.settings.range_start,
+				selection_end: &mut self.settings.range_end,
+				cursor: display_state.cursor,
+			};
 
-			painter.rect(rect, 0.0, bg_color, outline_stroke);
-
-			// Set selection
-			{
-				if response.drag_started() {
-					let num_samples_f = num_samples as f32;
-					let pos = response.interact_pointer_pos().unwrap();
-					let sample_index = ((pos.x - rect.min.x) / rect.width() * num_samples_f).clamp(0.0, num_samples_f) as usize;
-
-					self.settings.range_start = Some(sample_index.min(num_samples));
-					self.settings.range_end = self.settings.range_start;
-				}
-
-				if response.dragged() {
-					let num_samples_f = num_samples as f32;
-					let pos = response.interact_pointer_pos().unwrap();
-					let sample_index = ((pos.x - rect.min.x) / rect.width() * num_samples_f).clamp(0.0, num_samples_f) as usize;
-
-					if let Some(start) = self.settings.range_start.as_mut() {
-						if *start > sample_index {
-							*start = sample_index;
-						}
-					}
-
-					if let Some(end) = self.settings.range_end.as_mut() {
-						if *end < sample_index {
-							*end = sample_index;
-						}
-					}
-				}
-			}
-
-			// Draw selection
-			{
-				let (range_start, range_end) = (self.settings.range_start.unwrap_or(0), self.settings.range_end.unwrap_or(num_samples));
-
-				let num_samples = num_samples as f32;
-				let range_start_x = rect.min.x + range_start as f32 / num_samples * rect.width();
-				let range_end_x = rect.min.x + range_end as f32 / num_samples * rect.width();
-
-				let rect = egui::Rect::from_x_y_ranges(range_start_x..=range_end_x, rect.y_range());
-
-				painter.rect(rect, 0.0, selection_color, egui::Stroke::NONE);
-			}
-
-			// Draw mouse cursor
-			if let Some(pos) = response.hover_pos() {
-				painter.vline(pos.x, rect.y_range(), cursor_stroke);
-			}
-
-			if num_samples > 0 {
-				let display_width = rect.width();
-				let display_height = rect.height();
-				let center_y = rect.min.y + display_height / 2.0;
-
-				let display_state = self.coordinator.display_state();
-
-				// Draw waveform
-				for x in 0..display_width as usize {
-					let sample_index = (x as f32 / display_width * num_samples as f32) as usize;
-					let sample = display_state.play_buffer[sample_index].abs();
-
-					let top = center_y - display_height * sample / 2.0;
-					let bottom = center_y + display_height * sample / 2.0;
-
-					painter.vline(rect.min.x + x as f32, top..=bottom, wave_stroke);
-				}
-
-				// Draw play cursor
-				let cursor = display_state.cursor;
-				let cursor_x = cursor as f32 / num_samples as f32 * display_width;
-
-				painter.vline(rect.min.x + cursor_x, rect.y_range(), cursor_stroke);
-			}
+			ui.add(waveform_widget);
 		});
 
 		ctx.request_repaint();

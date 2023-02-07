@@ -994,6 +994,7 @@ dependencies = [
  "anyhow",
  "cpal",
  "eframe",
+ "egui",
  "rand",
  "rubato",
  "tokio",
